@@ -8,7 +8,7 @@ Created on Tue Mar 24 23:20:26 2020
 
 import os.path
 import pandas as pd
-from datetime import datetime
+from datetime import datetime,timedelta
 
 def read_countrycode():
     url = 'https://raw.githubusercontent.com/lukes/ISO-3166-Countries-with-Regional-Codes/master/all/'
@@ -37,7 +37,8 @@ def read_countrycode():
 
 
 def read_population(csv_file):
-    base_path="covid-19/data/"
+    #base_path="data/"
+    base_path="/Users/christophenoblanc/Documents/ProjetsPython/DSSP_Projet_DVF/covid-19/data/"
     infile=base_path+csv_file
     df=pd.read_csv(infile, parse_dates=[4],skip_blank_lines=False )
     df=df.drop(columns=['2015 [YR2015]','2016 [YR2016]','2017 [YR2017]','2019 [YR2019]'])
@@ -89,9 +90,33 @@ def read_covid_19(csv_file,countries_df,population_df):
     df['date']=pd.to_datetime(df['variable'])
     df=df.drop(columns='variable')
     df.value = pd.to_numeric(df.value, errors='coerce')
-    
+
     # Group by Province/State
     df_grouped=df.groupby(['Country','alpha-3','region','sub-region','total_pop','pop_65up','date'])['value'].sum().reset_index()
+
+    # Merge with Last day value
+    df_grouped['date_yesterday']=df_grouped['date'] - pd.to_timedelta(1, unit='d')
+    yesterday_df=df_grouped[['alpha-3','date','value']].copy()
+    yesterday_df=yesterday_df.rename(columns = {'date':'date_yesterday', 'value':'yesterday_value'})
+    df_grouped=pd.merge(df_grouped, yesterday_df, on=['alpha-3','date_yesterday'], how='left')
+    df_grouped=df_grouped.drop(columns=['date_yesterday'])
+    df_grouped['delta_value']=df_grouped['value']-df_grouped['yesterday_value']
+
+    last_days=5
+    df_grouped['rolling_mean_delta'] = df_grouped.groupby('alpha-3')['delta_value'].rolling(last_days, min_periods=1).mean().reset_index(0,drop=True)
+
+    first_df=(df_grouped[df_grouped.value >= 10]).groupby(['alpha-3'])['date'].min().reset_index()
+    first_df=first_df.rename(columns = {'date':'first_date'})
+    df_grouped=pd.merge(df_grouped, first_df, on='alpha-3', how='left')
+    
+    group_byday_df=death_df.dropna(subset=['first_date'])
+    group_byday_df['day'] = (group_byday_df['date'] - group_byday_df['first_date']).dt.days
+    group_byday_df=group_byday_df[group_byday_df.day >=0]
+    
+    # Add population rate
+    group_byday_df['rate_1M_pop']=group_byday_df['value']/(group_byday_df['total_pop']/1000000)
+    group_byday_df['rate_1M_pop_65up']=group_byday_df['value']/(group_byday_df['pop_65up']/1000000)
+
     return df_grouped
 
 # Prepare Daily stats by countries
@@ -103,8 +128,20 @@ pop_total=(population_df[(population_df.series=='SP.POP.0014.TO') | (population_
 
 confirmed_df=read_covid_19("time_series_covid19_confirmed_global.csv",countries_df,population_df)
 death_df=read_covid_19("time_series_covid19_deaths_global.csv",countries_df,population_df)
-
 lastday_refresh=death_df['date'].max()
+
+# Get stats for the Last x days
+df_grouped=confirmed_df.copy()
+#df_grouped.reset_index(inplace=True)    # This gives us index 0,1,2... and a new col 'index'
+#df_grouped.set_index('date', inplace=True)    # Replace with date in yours
+# This next bit does the groupby and rolling, which will give a df 
+# with a multi index of foo and baz, then reset_index(0) to remove the foo index level
+# so that it matches the original df index so that you can add it as a new column
+df_grouped['rolling'] = df_grouped.groupby('alpha-3')['value'].rolling(5, min_periods=1).mean().reset_index(0,drop=True)
+#df_grouped.reset_index(inplace=True)    # brings baz back into the df as a column
+#df.set_index('index', inplace=True)   # sets the index back to the original
+
+
 
 # Get the offset by the first day of 10 death
 firstDeath_df=(death_df[death_df.value >= 10]).groupby(['alpha-3'])['date'].min().reset_index()
@@ -228,6 +265,26 @@ ax0.set_ylim([0, cut_death_to])
 ax0.set_ylabel('death count by "1 million population of aged 65+" ')
 ax0.set_xlabel('days since 10th death')
 ax0.set_title('Number of death by "1 million population aged 65+" since 10th death (top %i countries, refreshed %s)'%(top_country,lastday_refresh.strftime('%d %b %Y')))
+plt.legend(loc="upper left")
+plt.show()
+
+
+# Show Number of Mean of Last 5 days of Delta Death by Day count since 10th Death
+import seaborn as sns
+import matplotlib.pyplot as plt
+country_order=death_byday_df.groupby(['Country'])['value'].max().reset_index().sort_values(by='value', ascending=False)
+top_country=25
+country_order=country_order[:top_country]
+f, ax0 = plt.subplots(1, 1, sharey=True,figsize=(15, 10))
+for a in country_order['Country']:
+    data=death_byday_df[death_byday_df.Country == a]
+    plt.plot(data["day"], data["rolling_mean_delta"], label=a,marker=".")
+    plt.annotate(xy=[data['day'].max(),data['rolling_mean_delta'].max()], s=a)
+#labelLines(plt.gca().get_lines(), zorder=2.5)
+#labelLines(plt.gca().get_lines(), align=False, color='k')
+ax0.set_ylabel('rolling_mean_delta = (mean of additional death from previous 5 days)')
+ax0.set_xlabel('days since 10th death')
+ax0.set_title('Mean of # of daily additional death (delta death) since 10th death (top %i countries, refreshed %s)'%(top_country,lastday_refresh.strftime('%d %b %Y')))
 plt.legend(loc="upper left")
 plt.show()
 
